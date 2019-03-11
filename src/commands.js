@@ -45,7 +45,7 @@ export function joinBackward(state, dispatch, view) {
       (textblockAt(before, "end") || NodeSelection.isSelectable(before))) {
     if (dispatch) {
       let tr = state.tr.deleteRange($cursor.before(), $cursor.after())
-      tr.setSelection(textblockAt(before, "end") ? Selection.findFrom(tr.doc.resolve($cursor.before()), -1)
+      tr.setSelection(textblockAt(before, "end") ? Selection.findFrom(tr.doc.resolve(tr.mapping.map($cut.pos, -1)), -1)
                       : NodeSelection.create(tr.doc, $cut.pos - before.nodeSize))
       dispatch(tr.scrollIntoView())
     }
@@ -122,7 +122,7 @@ export function joinForward(state, dispatch, view) {
       (textblockAt(after, "start") || NodeSelection.isSelectable(after))) {
     if (dispatch) {
       let tr = state.tr.deleteRange($cursor.before(), $cursor.after())
-      tr.setSelection(textblockAt(after, "start") ? Selection.findFrom($cut, 1)
+      tr.setSelection(textblockAt(after, "start") ? Selection.findFrom(tr.doc.resolve(tr.mapping.map($cut.pos)), 1)
                       : NodeSelection.create(tr.doc, tr.mapping.map($cut.pos)))
       dispatch(tr.scrollIntoView())
     }
@@ -234,7 +234,7 @@ export function newlineInCode(state, dispatch) {
 export function exitCode(state, dispatch) {
   let {$head, $anchor} = state.selection
   if (!$head.parent.type.spec.code || !$head.sameParent($anchor)) return false
-  let above = $head.node(-1), after = $head.indexAfter(-1), type = above.defaultContentType(after)
+  let above = $head.node(-1), after = $head.indexAfter(-1), type = above.contentMatchAt(after).defaultType
   if (!above.canReplaceWith(after, after, type)) return false
   if (dispatch) {
     let pos = $head.after(), tr = state.tr.replaceWith(pos, pos, type.createAndFill())
@@ -250,7 +250,7 @@ export function exitCode(state, dispatch) {
 export function createParagraphNear(state, dispatch) {
   let {$from, $to} = state.selection
   if ($from.parent.inlineContent || $to.parent.inlineContent) return false
-  let type = $from.parent.defaultContentType($to.indexAfter())
+  let type = $from.parent.contentMatchAt($to.indexAfter()).defaultType
   if (!type || !type.isTextblock) return false
   if (dispatch) {
     let side = (!$from.parentOffset && $to.index() < $to.parent.childCount ? $from : $to).pos
@@ -291,12 +291,14 @@ export function splitBlock(state, dispatch) {
     return true
   }
 
+  if (!$from.parent.isBlock) return false
+
   if (dispatch) {
     let atEnd = $to.parentOffset == $to.parent.content.size
     let tr = state.tr
     if (state.selection instanceof TextSelection) tr.deleteSelection()
-    let deflt = $from.depth == 0 ? null : $from.node(-1).defaultContentType($from.indexAfter(-1))
-    let types = atEnd ? [{type: deflt}] : null
+    let deflt = $from.depth == 0 ? null : $from.node(-1).contentMatchAt($from.indexAfter(-1)).defaultType
+    let types = atEnd && deflt ? [{type: deflt}] : null
     let can = canSplit(tr.doc, $from.pos, 1, types)
     if (!types && !can && canSplit(tr.doc, tr.mapping.map($from.pos), 1, deflt && [{type: deflt}])) {
       types = [{type: deflt}]
@@ -362,6 +364,7 @@ function joinMaybeClear(state, $pos, dispatch) {
 
 function deleteBarrier(state, $cut, dispatch) {
   let before = $cut.nodeBefore, after = $cut.nodeAfter, conn, match
+  if (before.type.spec.isolating || after.type.spec.isolating) return false
   if (joinMaybeClear(state, $cut, dispatch)) return true
 
   if ($cut.parent.canReplace($cut.index(), $cut.index() + 1) &&
@@ -406,22 +409,23 @@ export function wrapIn(nodeType, attrs) {
 }
 
 // :: (NodeType, ?Object) → (state: EditorState, dispatch: ?(tr: Transaction)) → bool
-// Returns a command that tries to set the textblock around the
-// selection to the given node type with the given attributes.
+// Returns a command that tries to set the selected textblocks to the
+// given node type with the given attributes.
 export function setBlockType(nodeType, attrs) {
   return function(state, dispatch) {
     let {from, to} = state.selection
-    let firstTextblock = null, firstPos = -1
+    let applicable = false
     state.doc.nodesBetween(from, to, (node, pos) => {
-      if (firstTextblock) return false
-      if (node.isTextblock) {
-        firstTextblock = node
-        firstPos = pos
+      if (applicable) return false
+      if (!node.isTextblock || node.hasMarkup(nodeType, attrs)) return
+      if (node.type == nodeType) {
+        applicable = true
+      } else {
+        let $pos = state.doc.resolve(pos), index = $pos.index()
+        applicable = $pos.parent.canReplaceWith(index, index + 1, nodeType)
       }
     })
-    if (!firstTextblock || firstTextblock.hasMarkup(nodeType, attrs)) return false
-    let $firstPos = state.doc.resolve(firstPos), index = $firstPos.index()
-    if (!$firstPos.parent.canReplaceWith(index, index + 1, nodeType)) return false
+    if (!applicable) return false
     if (dispatch) dispatch(state.tr.setBlockType(from, to, nodeType, attrs).scrollIntoView())
     return true
   }
